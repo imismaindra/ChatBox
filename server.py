@@ -1,6 +1,9 @@
 import socket
 import threading
 
+HOST = '0.0.0.0'  # Dengarkan di semua interface agar dapat diakses dari perangkat lain di LAN
+PORT = 8081
+
 def handle_client(conn, addr):
     """Fungsi untuk menangani setiap client"""
     print(f"[NEW CONNECTION] {addr} connected")
@@ -19,9 +22,10 @@ def handle_client(conn, addr):
 
 def start_server():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind(('localhost', 8080))
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind((HOST, PORT))
     server.listen(5)
-    print("[STARTING] Server is listening on port 8080...")
+    print(f"[STARTING] Server is listening on {HOST}:{PORT} ...")
     
     try:
         while True:
