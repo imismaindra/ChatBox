@@ -2,17 +2,24 @@ import socket
 import threading
 import datetime
 import os
+import signal
+import sys
 
-HOST = '172.18.3.195' 
-PORT = 8081
+# Gunakan HOST/PORT dari environment bila ada; default ke semua interface
+HOST = os.environ.get('HOST', '0.0.0.0')
+PORT = int(os.environ.get('PORT', '8081'))
 
-# Buat direktori untuk menyimpan log jika belum ada
+# Buat direktori untuk menyimpan log 
 LOG_DIR = "chat_logs"
 if not os.path.exists(LOG_DIR):
     os.makedirs(LOG_DIR)
 
 # List untuk menyimpan semua client yang terhubung
 connected_clients = []
+# List untuk menyimpan semua thread client
+client_threads = []
+# Flag untuk mengontrol server
+server_running = True
 
 def log_message(client_addr, message, message_type="RECEIVED"):
     """Fungsi untuk menyimpan log percakapan"""
@@ -53,17 +60,27 @@ def handle_client(conn, addr):
     broadcast_message(f"User {addr[0]} joined the chat", addr, conn)
     
     try:
-        while True:
-            data = conn.recv(1024).decode()
-            if not data:
+        while server_running:
+            try:
+                # Set timeout untuk recv agar bisa check server_running flag
+                conn.settimeout(1.0)
+                data = conn.recv(1024).decode()
+                if not data:
+                    break
+                
+                print(f"[{addr}] Received: {data}")
+                # Log pesan yang diterima
+                log_message(addr, data, "RECEIVED")
+                
+                # Broadcast pesan ke semua client lain
+                broadcast_message(data, addr, conn)
+            except socket.timeout:
+                # Timeout, check server_running flag
+                continue
+            except Exception as e:
+                print(f"[ERROR] {addr}: {e}")
+                log_message(addr, f"ERROR: {e}", "SYSTEM")
                 break
-            
-            print(f"[{addr}] Received: {data}")
-            # Log pesan yang diterima
-            log_message(addr, data, "RECEIVED")
-            
-            # Broadcast pesan ke semua client lain
-            broadcast_message(data, addr, conn)
             
     except Exception as e:
         print(f"[ERROR] {addr}: {e}")
@@ -74,7 +91,8 @@ def handle_client(conn, addr):
             connected_clients.remove((conn, addr))
         
         # Notifikasi ke semua client bahwa ada client yang keluar
-        broadcast_message(f"User {addr[0]} left the chat", addr, conn)
+        if server_running:
+            broadcast_message(f"User {addr[0]} left the chat", addr, conn)
         
         conn.close()
         print(f"[DISCONNECTED] {addr}")
@@ -87,7 +105,7 @@ def server_chat_input():
     print("Ketik pesan server atau 'quit' untuk keluar dari mode chat server")
     print("-" * 50)
     
-    while True:
+    while server_running:
         try:
             server_message = input("Server: ")
             if server_message.lower() == 'quit':
@@ -114,17 +132,54 @@ def server_chat_input():
                 print("Tidak ada client yang terhubung")
                 
         except KeyboardInterrupt:
+            print("\nServer chat interrupted")
             break
         except Exception as e:
             print(f"Error server chat: {e}")
 
+def shutdown_server():
+    """Fungsi untuk shutdown server dengan proper cleanup"""
+    global server_running
+    print("\n[SHUTTING DOWN] Server sedang dimatikan...")
+    server_running = False
+    
+    # Tutup semua koneksi client
+    for client_conn, client_addr in connected_clients[:]:
+        try:
+            client_conn.close()
+        except:
+            pass
+    connected_clients.clear()
+    
+    # Tunggu semua thread client selesai
+    for thread in client_threads[:]:
+        if thread.is_alive():
+            thread.join(timeout=2.0)
+    client_threads.clear()
+    
+    print("[SHUTDOWN COMPLETE] Server berhasil dimatikan")
+
+def signal_handler(signum, frame):
+    """Handler untuk signal SIGINT dan SIGTERM"""
+    print(f"\n[RECEIVED SIGNAL {signum}] Server akan dimatikan...")
+    shutdown_server()
+    sys.exit(0)
+
 def start_server():
+    global server_running
+    server_running = True
+    
+    # Register signal handler
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((HOST, PORT))
     server.listen(5)
     print(f"[STARTING] Server berjalan di {HOST}:{PORT} ...")
     print("Server dapat mengirim pesan ke semua client!")
+    print("Tekan Ctrl+C untuk menghentikan server")
     
     # Buat thread untuk server chat input
     server_chat_thread = threading.Thread(target=server_chat_input)
@@ -132,13 +187,29 @@ def start_server():
     server_chat_thread.start()
     
     try:
-        while True:
-            conn, addr = server.accept()
-            # Buat thread baru untuk setiap client
-            thread = threading.Thread(target=handle_client, args=(conn, addr))
-            thread.start()
+        while server_running:
+            try:
+                # Set timeout untuk accept agar bisa check server_running flag
+                server.settimeout(1.0)
+                conn, addr = server.accept()
+                
+                # Buat thread baru untuk setiap client
+                thread = threading.Thread(target=handle_client, args=(conn, addr))
+                thread.daemon = True
+                thread.start()
+                client_threads.append(thread)
+                
+            except socket.timeout:
+                # Timeout, check server_running flag
+                continue
+            except Exception as e:
+                if server_running:
+                    print(f"[ERROR] Accept connection: {e}")
+                    
     except KeyboardInterrupt:
-        print("\n[SHUTTING DOWN] Server stopped")
+        print("\n[KEYBOARD INTERRUPT] Server dimatikan oleh user")
+    finally:
+        shutdown_server()
         server.close()
 
 if __name__ == "__main__":
