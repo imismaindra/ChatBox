@@ -4,6 +4,7 @@ import datetime
 import os
 import signal
 import sys
+import queue
 try:
     import tkinter as tk
     from tkinter import ttk, messagebox
@@ -26,6 +27,15 @@ connected_clients = []
 client_threads = []
 # Flag untuk mengontrol server
 server_running = True
+
+# Queue untuk mengirim log dari thread server ke GUI
+log_queue = queue.Queue()
+
+def enqueue_log(text: str):
+    try:
+        log_queue.put(text)
+    except Exception:
+        pass
 
 def log_message(client_addr, message, message_type="RECEIVED"):
     """Fungsi untuk menyimpan log percakapan"""
@@ -56,11 +66,13 @@ def broadcast_message(message, sender_addr, sender_conn):
 def handle_client(conn, addr):
     """Fungsi untuk menangani setiap client"""
     print(f"[NEW CONNECTION] {addr} connected")
+    enqueue_log(f"[NEW CONNECTION] {addr} connected")
     log_message(addr, "CLIENT CONNECTED", "SYSTEM")
     
     # Tambahkan client ke list
     connected_clients.append((conn, addr))
     print(f"[ACTIVE CONNECTIONS] {len(connected_clients)}")
+    enqueue_log(f"[ACTIVE CONNECTIONS] {len(connected_clients)}")
     
     # Kirim notifikasi ke semua client bahwa ada client baru
     broadcast_message(f"User {addr[0]} joined the chat", addr, conn)
@@ -75,6 +87,7 @@ def handle_client(conn, addr):
                     break
                 
                 print(f"[{addr}] Received: {data}")
+                enqueue_log(f"[{addr}] Received: {data}")
                 # Log pesan yang diterima
                 log_message(addr, data, "RECEIVED")
                 
@@ -85,6 +98,7 @@ def handle_client(conn, addr):
                 continue
             except Exception as e:
                 print(f"[ERROR] {addr}: {e}")
+                enqueue_log(f"[ERROR] {addr}: {e}")
                 log_message(addr, f"ERROR: {e}", "SYSTEM")
                 break
             
@@ -102,7 +116,9 @@ def handle_client(conn, addr):
         
         conn.close()
         print(f"[DISCONNECTED] {addr}")
+        enqueue_log(f"[DISCONNECTED] {addr}")
         print(f"[ACTIVE CONNECTIONS] {len(connected_clients)}")
+        enqueue_log(f"[ACTIVE CONNECTIONS] {len(connected_clients)}")
         log_message(addr, "CLIENT DISCONNECTED", "SYSTEM")
 
 def server_chat_input():
@@ -164,12 +180,14 @@ def broadcast_from_server(message: str):
             except Exception:
                 pass
     log_message(("SERVER", 0), f"SERVER MESSAGE: {message}", "SERVER")
+    enqueue_log(f"SERVER broadcast delivered to {delivered} client(s)")
     return delivered
 
 def shutdown_server():
     """Fungsi untuk shutdown server dengan proper cleanup"""
     global server_running
     print("\n[SHUTTING DOWN] Server sedang dimatikan...")
+    enqueue_log("[SHUTTING DOWN] Server sedang dimatikan...")
     server_running = False
     
     # Tutup semua koneksi client
@@ -187,6 +205,7 @@ def shutdown_server():
     client_threads.clear()
     
     print("[SHUTDOWN COMPLETE] Server berhasil dimatikan")
+    enqueue_log("[SHUTDOWN COMPLETE] Server berhasil dimatikan")
 
 def signal_handler(signum, frame):
     """Handler untuk signal SIGINT dan SIGTERM"""
@@ -216,8 +235,11 @@ def start_server():
     server.bind((HOST, PORT))
     server.listen(5)
     print(f"[STARTING] Server berjalan di {HOST}:{PORT} ...")
+    enqueue_log(f"[STARTING] Server berjalan di {HOST}:{PORT} ...")
     print("Server dapat mengirim pesan ke semua client!")
+    enqueue_log("Server dapat mengirim pesan ke semua client!")
     print("Tekan Ctrl+C untuk menghentikan server")
+    enqueue_log("Tekan Ctrl+C untuk menghentikan server")
     
     # Buat thread untuk server chat input
     server_chat_thread = threading.Thread(target=server_chat_input)
@@ -243,6 +265,7 @@ def start_server():
             except Exception as e:
                 if server_running:
                     print(f"[ERROR] Accept connection: {e}")
+                    enqueue_log(f"[ERROR] Accept connection: {e}")
                     
     except KeyboardInterrupt:
         print("\n[KEYBOARD INTERRUPT] Server dimatikan oleh user")
@@ -298,6 +321,8 @@ class ServerControlGUI:
         self.send_btn.grid(row=0, column=1, padx=(8,0))
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        # Polling queue log dari thread server
+        self.root.after(200, self._poll_logs)
 
     def append_log(self, text):
         self.log_box.configure(state=tk.NORMAL)
@@ -348,6 +373,16 @@ class ServerControlGUI:
     def on_close(self):
         self.stop_server_gui()
         self.root.destroy()
+
+    def _poll_logs(self):
+        try:
+            while True:
+                msg = log_queue.get_nowait()
+                self.append_log(msg)
+        except Exception:
+            pass
+        # jadwalkan polling berikutnya
+        self.root.after(200, self._poll_logs)
 
 def gui_main():
     if tk is None:
